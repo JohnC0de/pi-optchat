@@ -1,6 +1,6 @@
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createConnection } from 'node:net';
 import { basename, join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -107,33 +107,53 @@ test('a client that hangs up early does not crash the process holding the lock',
   }
 });
 
-test('a socket path over the system limit names TMPDIR and its length without binding a truncated socket, and one at the limit locks', async () => {
-  const root = mkdtempSync('/tmp/oc.'), oldTmp = process.env.TMPDIR;
+test('two Pis with different TMPDIRs still share one profile lock', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-lock-')), oldTmp = process.env.TMPDIR;
+  const temps = [mkdtempSync(join(tmpdir(), 'optchat-tmp-a-')), mkdtempSync(join(tmpdir(), 'optchat-tmp-b-'))];
+  process.env.TMPDIR = temps[0];
+  const unlock = await lockProfile(dir, 'first');
+  try {
+    process.env.TMPDIR = temps[1];
+    await assert.rejects(lockProfile(dir, 'second'), /first/);
+  } finally {
+    await unlock();
+    if (oldTmp === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = oldTmp;
+    for (const path of [dir, ...temps]) rmSync(path, { recursive: true, force: true });
+  }
+});
+
+test('a regular file named like the lock socket is refused, not deleted', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-lock-'));
+  try {
+    writeFileSync(profileSocket(dir), 'notes');
+    await assert.rejects(lockProfile(dir, 'holder'), /is not an OptChat socket/);
+    assert.equal(readFileSync(profileSocket(dir), 'utf8'), 'notes');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a socket path over the system limit names OPTCHAT_HOME and its length without binding a truncated socket, and one at the limit locks', async () => {
+  const root = mkdtempSync('/tmp/oc.');
   try {
     const fileLength = Buffer.byteLength(basename(profileSocket(root)));
-    const tmpdirOf = (socketLength: number) => { const dir = join(root, 'q'.repeat(socketLength - fileLength - 1 - root.length - 1)); mkdirSync(dir); return dir; };
-    const atLimit = tmpdirOf(SOCKET_PATH_LIMIT), overLimit = tmpdirOf(SOCKET_PATH_LIMIT + 1), long = join(root, 'p'.repeat(200));
+    const profileOf = (socketLength: number) => { const dir = join(root, 'q'.repeat(socketLength - fileLength - 1 - root.length - 1)); mkdirSync(dir); return dir; };
+    const atLimit = profileOf(SOCKET_PATH_LIMIT), overLimit = profileOf(SOCKET_PATH_LIMIT + 1), long = join(root, 'p'.repeat(200));
     mkdirSync(long);
 
-    process.env.TMPDIR = atLimit;
-    assert.equal(Buffer.byteLength(profileSocket(root)), SOCKET_PATH_LIMIT);
-    const unlock = await lockProfile(root, 'holder'); await unlock();
+    assert.equal(Buffer.byteLength(profileSocket(atLimit)), SOCKET_PATH_LIMIT);
+    const unlock = await lockProfile(atLimit, 'holder'); await unlock();
 
-    for (const tmp of [overLimit, long]) {
-      process.env.TMPDIR = tmp;
-      await assert.rejects(lockProfile(root, 'holder'), /TMPDIR to a shorter directory/);
-      await assert.rejects(lockProfile(root, 'holder'), new RegExp(`${Buffer.byteLength(profileSocket(root))} bytes`));
+    for (const dir of [overLimit, long]) {
+      await assert.rejects(lockProfile(dir, 'holder'), /OPTCHAT_HOME to a shorter directory/);
+      await assert.rejects(lockProfile(dir, 'holder'), new RegExp(`${Buffer.byteLength(profileSocket(dir))} bytes`));
+      assert.deepEqual(readdirSync(dir), [], 'no truncated socket was bound');
     }
-    assert.deepEqual(readdirSync(overLimit), []);
-    assert.deepEqual(readdirSync(root).sort(), [basename(atLimit), basename(overLimit), basename(long)].sort(), 'no truncated socket was bound next to the directories');
   } finally {
-    if (oldTmp === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = oldTmp;
     rmSync(root, { recursive: true, force: true });
   }
 });
 
 test('a second writer that got past the lock is refused on its next turn, with the log intact', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'optchat-writer-')), oldHome = process.env.OPTCHAT_HOME;
+  const dir = mkdtempSync(join(tmpdir(), 'oc-writer-')), oldHome = process.env.OPTCHAT_HOME;
   process.env.OPTCHAT_HOME = join(dir, 'home');
   let session: Awaited<ReturnType<typeof start>>['session'] | undefined;
   try {

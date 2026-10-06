@@ -1,8 +1,7 @@
-import { chmodSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createConnection, createServer } from 'node:net';
-import { homedir, tmpdir } from 'node:os';
+import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { createHash } from 'node:crypto';
 import type { ModelChoice } from './compactor.ts';
 import { record } from './cache.ts';
 import { DEFAULT_SETTINGS, readSettings, type Settings } from './settings.ts';
@@ -61,17 +60,24 @@ export function rememberProfile(name: string) { atomicWrite(join(dataHome(), 'la
 export class ProfileBusyError extends Error {
   constructor(readonly owner: string) { super(`Profile already running: ${owner}`); }
 }
-export function profileSocket(dir: string, purpose: 'lock' | 'windows' = 'lock') {
-  const hash = createHash('sha256').update(dir).digest('hex').slice(0, 24);
-  return join(tmpdir(), `pi-optchat-${process.getuid?.() ?? 'user'}-${hash}${purpose === 'lock' ? '' : '-windows'}.sock`);
-}
+/** Lives in the profile itself, so every Pi on this profile finds the same socket whatever its TMPDIR. Git skips sockets, so checkpoints never see it. */
+export const profileSocket = (dir: string, purpose: 'lock' | 'windows' = 'lock') => join(dir, `${purpose}.sock`);
 
 // sun_path is 104 bytes on macOS and 108 elsewhere, both including the NUL. Node 22 binds a truncated path instead of failing, so the length is checked before listen.
 export const SOCKET_PATH_LIMIT = process.platform === 'darwin' ? 103 : 107;
 export function checkSocketPath(path: string) {
   const length = Buffer.byteLength(path);
-  if (length > SOCKET_PATH_LIMIT) throw new Error(`Cannot listen on the profile socket: its path is ${length} bytes, over this system's limit of ${SOCKET_PATH_LIMIT}. Set TMPDIR to a shorter directory: ${path}`);
+  if (length > SOCKET_PATH_LIMIT) throw new Error(`Cannot listen on the profile socket: its path is ${length} bytes, over this system's limit of ${SOCKET_PATH_LIMIT}. Set OPTCHAT_HOME to a shorter directory: ${path}`);
 }
+
+/** A socket that may be replaced; a file that only shares its name is refused, never deleted. */
+function existingSocket(path: string) {
+  let stat; try { stat = lstatSync(path); } catch { return undefined; }
+  if (!stat.isSocket()) throw new Error(`${path} is not an OptChat socket. Move it out of the profile and try again.`);
+  return stat;
+}
+/** Removes a dead socket left by a previous owner. */
+export function removeStaleSocket(path: string) { if (existingSocket(path)) unlinkSync(path); }
 
 /** OS-owned socket lifetime, no timeout-based stealing of a busy profile. */
 export async function lockProfile(dir: string, description: string) {
@@ -85,7 +91,8 @@ export async function lockProfile(dir: string, description: string) {
   try { await listen(); }
   catch (error) {
     if (!(error instanceof Error) || !('code' in error) || error.code !== 'EADDRINUSE') throw error;
-    const before = statSync(socketPath);
+    const before = existingSocket(socketPath);
+    if (!before) throw new Error('Profile lock changed; try again.');
     const owner = await new Promise<string | undefined>((resolve, reject) => {
       const socket = createConnection(socketPath); let message = '';
       socket.setTimeout(1500, () => { socket.destroy(); reject(new Error('Profile lock did not respond; refusing to steal it.')); });
