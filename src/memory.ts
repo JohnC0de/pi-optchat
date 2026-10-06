@@ -89,6 +89,8 @@ export class Memory {
   /** Per level, every node below this index is built. */
   private readonly low: number[] = [];
   private retryTimer?: ReturnType<typeof setTimeout>;
+  /** The most summaries owed at once since none were last owed. */
+  private peak = 0;
   private scheduled = false;
   private stopped = false;
   lastError?: string;
@@ -134,6 +136,13 @@ export class Memory {
   get pending() { return this.root.length - this.leaves; }
   get active() { return this.busy.size; }
   get size() { return this.viewBytes; }
+  /** Summaries built out of the backlog since it was last empty, and when the next failed one is retried. */
+  progress(now = Date.now()) {
+    const due = Math.min(...[...this.retryAt.values()].filter(t => t > now));
+    return { done: this.peak - this.owed(), total: this.peak, retryIn: Number.isFinite(due) ? due - now : undefined };
+  }
+  private owed() { return this.expectedNodes() - this.tree.size; }
+  onChange(listener: () => void) { this.events.on('change', listener); return () => { this.events.off('change', listener); }; }
   /** The view line covering message `at`. The view tiles the log in order, so a binary search finds it. */
   covering(at: number): Part | undefined {
     for (let lo = 0, hi = this.view.length - 1; lo <= hi;) {
@@ -159,6 +168,8 @@ export class Memory {
       this.viewBytes += this.partBytes(parent) - this.partBytes(a) - this.partBytes(b);
       this.view.splice(best, 2, parent);
     }
+    const owed = this.owed();
+    this.peak = owed > 0 ? Math.max(this.peak, owed) : 0;
     this.events.emit('change');
   }
   private schedule() {

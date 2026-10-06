@@ -48,6 +48,7 @@ For headless use, pass `--optchat-profile work`.
 | `/optchat agents` | Live agent tree and saved run history. |
 | `/optchat agents model` | Subagent model and effort for this profile. |
 | `/optchat usage` | Token usage and cost estimates. |
+| `/optchat activity` | Memory gauge: view size, summaries catching up, running agents. |
 | `/optchat instructions` | Edit this profile's `AGENTS.md`. |
 | `/optchat browse` | Open a readable snapshot of memory: the shape of what the model sees, summaries you can open down to the original messages, and search that shows where each message is folded. Run again to refresh. |
 | `/optchat import` | Import history, or resume/discard a paused import. |
@@ -103,9 +104,9 @@ Ask in plain words, for example: "Spawn an agent to investigate this repository 
 - Stopping an agent stops its whole subtree. A failed parent stops its descendants.
 - Agents run inside the Pi process. Closing Pi stops them; there is no detached mode.
 
-## Agents and usage inspector
+## Agents, usage and activity inspector
 
-An **Agents | Usage** bar sits below the input.
+An **Agents | Usage | Activity** bar sits below the input.
 
 | Key | Action |
 | --- | --- |
@@ -113,7 +114,7 @@ An **Agents | Usage** bar sits below the input.
 | **Left/Right**, **Enter** | Pick and open a section |
 | **Escape**, **Up**, or typing | Back to the editor |
 | **F6** | Open Agents directly, keeping your draft |
-| **Tab** | Switch between Agents and Usage |
+| **Tab** | Cycle Agents, Usage and Activity |
 
 Set a different shortcut with `OPTCHAT_INSPECT_KEY=ctrl+shift+a pi`. If another extension supplies a custom editor, OptChat leaves its Down key alone; use the shortcut or commands instead.
 
@@ -133,6 +134,10 @@ Guidance shows as queued until delivered, or undelivered if the child stops firs
 **Usage** shows this session, last hour, today, last 7 days, or all time (**Left/Right**): one row per role and model (main agent, subagents, compactor, imports) with estimated cost, share of the total, output tokens, and how much input came from the cache. Costs are API prices, not your subscription bill.
 
 ![Usage page](docs/screenshots/usage.png)
+
+**Activity** is a memory gauge: how many messages the profile holds and how much of the 128 KB view they fill, then either **Settled** or **Catching up · 12 of 40 summaries** with a progress bar counted from when the backlog last grew from empty. If summarizing keeps failing, the last error and the retry countdown show under it. It also counts running agents; their list is on Agents. While summaries or agents are at work, the bar's Activity item gets a **●**.
+
+![Activity page](docs/screenshots/activity.png)
 
 - Costs are API-rate estimates, not your subscription bill. Unknown rates show zero.
 - Record counts are not request counts; retries and tool overhead can add records.
