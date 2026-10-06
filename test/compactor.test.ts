@@ -88,3 +88,75 @@ test('a waiting call that is cancelled stops at once without ever calling the mo
   await primer;
   assert.deepEqual(calls.map(c => c.source), ['a']);
 });
+
+/** Fake OpenAI Responses models that record the content parts OptChat's payload hook sends, in the order calls start. */
+async function responses(models: string[], compat: Record<string, { supportsExplicitPromptCacheMode: boolean }> = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-compactor-'));
+  const sent: { model: string; parts: unknown[] }[] = [];
+  const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, modelsStorePath: join(dir, 'models.json'), refreshOnCreate: false });
+  for (const provider of new Set(models.map(m => m.split('/')[0]))) runtime.registerProvider(provider, {
+    baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'openai-responses',
+    models: models.filter(m => m.startsWith(provider + '/')).map(m => ({ id: m.slice(provider.length + 1), name: m, compat: compat[m], reasoning: false, input: ['text' as const],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 200000, maxTokens: 1000 })),
+    streamSimple(model, context, options) {
+      const stream = createAssistantMessageEventStream();
+      void (async () => {
+        const request = context.messages.find(m => m.role === 'user')!;
+        const content = Array.isArray(request.content) ? request.content.flatMap(c => c.type === 'text' ? [{ type: 'input_text', text: c.text }] : []) : [];
+        const payload = await options?.onPayload?.({ model: model.id, input: [{ role: 'user', content }] }, model) as { input: { content: unknown[] }[] };
+        sent.push({ model: `${model.provider}/${model.id}`, parts: payload.input[0].content });
+        const message: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: 'summary' }], api: model.api, provider: model.provider,
+          model: model.id, timestamp: Date.now(), stopReason: 'stop', usage: emptyUsage() };
+        stream.push({ type: 'start', partial: message });
+        await new Promise(resolve => setTimeout(resolve, 20));
+        stream.push({ type: 'text_delta', contentIndex: 0, delta: 'summary', partial: message });
+        stream.push({ type: 'done', reason: 'stop', message }); stream.end();
+      })();
+      return stream;
+    },
+  });
+  const registry = new ModelRegistry(runtime);
+  const view = `<chat>\n${'0+1|user: an old remembered line\n'.repeat(2000)}</chat>`;
+  const compressors = new Map(models.map(m => {
+    const [provider, model] = [m.split('/')[0], m.slice(m.indexOf('/') + 1)];
+    return [m, createCompressor(registry, () => ({ provider, model, thinking: 'off' }))];
+  }));
+  const run = (model: string, source: string) => compressors.get(model)!({ context: view, source: `${'x'.repeat(600)}\n${source}`, merge: false }, new AbortController().signal);
+  return { sent, run, view };
+}
+
+const marked = (parts: unknown[]) => parts.filter(p => JSON.stringify(p).includes('"prompt_cache_breakpoint":{"mode":"explicit"}')).length;
+
+test('Copilot\'s GPT-5.6+ summaries put a cache breakpoint after each stable cut and the view, so a new input reuses the view', async () => {
+  // No flag on these fake Copilot entries: like pi-ai's, they take it from OpenAI's own entry of the model.
+  const models = ['github-copilot/gpt-6.1-sol', 'github-copilot/gpt-5.6-luna'];
+  const { sent, run, view } = await responses(models);
+  for (const model of models) await run(model, 'a');
+  assert.equal(sent.length, 2);
+  for (const { model, parts } of sent) {
+    assert.equal(marked(parts), 2, `${model}: a ~66KB view has one stable cut plus its end`);
+    assert.equal(parts.slice(0, 2).map(p => (p as { text: string }).text).join(''), view, 'the view text is unchanged');
+    assert.equal(marked(parts.slice(2)), 0, 'the new input is not marked');
+  }
+});
+
+test('other models are sent as before: no breakpoints, no waiting on a primer', async () => {
+  // Copilot 400s marks on gpt-5.5 and older; OpenAI caches the view without them and rejects them on a ChatGPT sign-in.
+  const models = ['github-copilot/gpt-5.5', 'github-copilot/grok-4.7', 'openai/gpt-6.1-sol'];
+  const { sent, run } = await responses(models, { 'openai/gpt-6.1-sol': { supportsExplicitPromptCacheMode: true } });
+  for (const model of models) await run(model, 'a');
+  assert.deepEqual(sent.map(s => [s.model, s.parts.length, marked(s.parts)]), models.map(m => [m, 2, 0]));
+  const parallel = ['b', 'c'].map(source => run('openai/gpt-6.1-sol', source));
+  await new Promise(resolve => setTimeout(resolve, 5));
+  assert.equal(sent.length, 5, 'both calls start at once');
+  await Promise.all(parallel);
+});
+
+test('parallel Sol calls on a cold view wait for one to start answering, so they read its cache instead of all writing it', async () => {
+  const { sent, run } = await responses(['github-copilot/gpt-6.1-sol']);
+  const parallel = ['a', 'b', 'c'].map(source => run('github-copilot/gpt-6.1-sol', source));
+  await new Promise(resolve => setTimeout(resolve, 5));
+  assert.equal(sent.length, 1, 'only the primer is sent while the view is cold');
+  await Promise.all(parallel);
+  assert.equal(sent.length, 3);
+});

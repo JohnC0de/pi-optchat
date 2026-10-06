@@ -1,3 +1,5 @@
+import type { Api, Model } from '@earendil-works/pi-ai';
+import type { ModelRegistry } from '@earendil-works/pi-coding-agent';
 import { isView } from './memory.ts';
 
 export function record(value: unknown): value is Record<string, unknown> {
@@ -43,5 +45,31 @@ export function cachePayload(payload: unknown): unknown {
     if (Array.isArray(message.content)) for (const item of message.content) if (record(item) && !view.has(item)) delete item.cache_control;
   }
   payload.cache_control = { type: 'ephemeral' };
+  return payload;
+}
+
+/** Providers whose GPT-5.6+ models cache only up to explicit breakpoints (or a whole identical request), so a view followed by a new
+ * input is never reused without marks. Measured: OpenAI itself caches the view's prefix without marks and, signed in with ChatGPT,
+ * rejects them with a 400. */
+const NEEDS_BREAKPOINTS = new Set(['github-copilot']);
+const explicitCaching = (model: Model<Api> | undefined) =>
+  model?.compat && 'supportsExplicitPromptCacheMode' in model.compat ? model.compat.supportsExplicitPromptCacheMode : undefined;
+
+/** Copilot serves OpenAI's models, but pi-ai keeps OpenAI's "explicit prompt caching" flag only on OpenAI's own entry of the model. */
+export function takesBreakpoints(model: Model<Api>, registry: Pick<ModelRegistry, 'find'>) {
+  return model.api === 'openai-responses' && NEEDS_BREAKPOINTS.has(model.provider)
+    && (explicitCaching(model) ?? explicitCaching(registry.find('openai', model.id)) ?? false);
+}
+
+/** OpenAI Responses: a breakpoint after each stable cut and at the view's end, so calls with the same view share it. */
+export function breakpointPayload(payload: unknown): unknown {
+  if (!record(payload) || !Array.isArray(payload.input)) return payload;
+  for (const item of payload.input) {
+    if (!record(item) || item.role !== 'user' || !Array.isArray(item.content)) continue;
+    const at = item.content.findIndex((part: unknown) => record(part) && part.type === 'input_text' && typeof part.text === 'string' && isView(part.text));
+    if (at < 0) continue;
+    item.content.splice(at, 1, ...splitView(item.content[at].text).map(text => ({ type: 'input_text', text, prompt_cache_breakpoint: { mode: 'explicit' } })));
+    break;
+  }
   return payload;
 }

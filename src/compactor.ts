@@ -3,7 +3,7 @@ import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
 import type { ModelRegistry } from '@earendil-works/pi-coding-agent';
 import { COMPACT } from './prompts.ts';
 import { bytes, NODE, type Compressor } from './memory.ts';
-import { cachePayload, splitView } from './cache.ts';
+import { breakpointPayload, cachePayload, splitView, takesBreakpoints } from './cache.ts';
 import { IMPORT_GUIDANCE } from './import/guidance.ts';
 import { DEFAULT_SETTINGS } from './settings.ts';
 
@@ -56,7 +56,10 @@ export function createCompressor(registry: ModelRegistry, choice: () => ModelCho
     const step = `${input.historical ? IMPORT_GUIDANCE + '\n\n' : ''}For scale only, here is an example line, not from this chat; it is exactly 512 bytes and is never part of your input or your line:\n<example>${SCALE}</example>\n\n${input.merge ? 'Merge these two lines into one' : 'Compress this message into one line'}, in at most 512 bytes:\n<input>\n${input.source}\n</input>`;
     const messages: Message[] = [{ role: 'user', content: [{ type: 'text', text: input.context }, { type: 'text', text: step }], timestamp: Date.now() }];
     const view = splitView(input.context);
-    const prefix = model.api === 'anthropic-messages' && view.length > 1 ? `${model.provider}/${model.id}/${thinking ?? 'off'}\n${view.slice(0, -1).join('')}` : undefined;
+    const anthropic = model.api === 'anthropic-messages', marks = anthropic ? cachePayload : takesBreakpoints(model, registry) ? breakpointPayload : undefined;
+    // Anthropic marks only the stable cuts (its own end-of-request mark covers the input); Sol's last breakpoint ends the view.
+    const shared = anthropic ? view.slice(0, -1) : marks ? view : [];
+    const prefix = shared.length ? `${model.provider}/${model.id}/${thinking ?? 'off'}\n${shared.join('')}` : undefined;
     const tries: string[] = [];
     for (let attempt = 0; attempt < 5; attempt++) {
       const warmed = prefix ? await gate(prefix, signal) : () => {};
@@ -66,7 +69,7 @@ export function createCompressor(registry: ModelRegistry, choice: () => ModelCho
           // A shared session id is the OpenAI prompt-cache key; SSE because over a websocket Codex would chain unrelated parallel calls on one cached connection.
           sessionId: 'optchat-compactor', transport: 'sse',
           reasoning: thinking, signal, cacheRetention: 'short',
-          onPayload: payload => model.api === 'anthropic-messages' ? cachePayload(payload) : payload,
+          onPayload: payload => marks ? marks(payload) : payload,
         });
         // The cache entry is usable once the model starts answering.
         for await (const event of stream) if (event.type !== 'start') { warmed(event.type !== 'error'); break; }
