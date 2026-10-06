@@ -98,6 +98,35 @@ test('Codex imports user messages and final answers once, excluding commentary, 
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+const codexFixture = new URL('./fixtures/codex-rollout.jsonl', import.meta.url).pathname;
+const receipt = (...identity: unknown[]) => `import:${createHash('sha256').update(JSON.stringify(identity)).digest('hex')}`;
+const body = (e: ImportedEntry) => e.text.slice(e.text.indexOf(']\n') + 2);
+
+test('Codex titles and entries skip the context Codex injects, and keep what the user typed, even in Codex\'s tag shapes', async () => {
+  const dir = temp();
+  writeFileSync(join(dir, 'rollout-2026-03-04T09-00-00.jsonl'), readFileSync(codexFixture));
+  try {
+    const scan = await scanLocal('codex', [dir]);
+    assert.equal(scan.conversations.length, 1);
+    const [c] = scan.conversations;
+    assert.deepEqual({ id: c.id, project: c.project, title: c.title, date: c.date },
+      { id: '0199c0de-1111-7222-8333-444455556666', project: '/home/dev/synthetic-app', title: 'Add a --dry-run flag to the sync command.', date: '2026-03-04T09:00:02.000Z' });
+    const parsed = await readConversation(c);
+    assert.deepEqual(parsed.entries.map(e => [e.kind, e.origin?.message, body(e)]), [
+      ['user', 'msg-1', 'Add a --dry-run flag to the sync command.'],
+      ['talk', 'msg-2', 'Added --dry-run to sync.'],
+      ['user', 'msg-3', 'Now document the flag in the README.'],
+      ['talk', 'msg-4', 'Documented --dry-run in the README.'],
+      ['user', 'msg-5', '<EXTERNAL_notes>my own notes</EXTERNAL_notes>'],
+    ]);
+    assert.doesNotMatch(JSON.stringify(parsed.entries), /AGENTS\.md|environment_context|external_repo|user_shell_command|<skill>|hook_prompt|codex_internal_context|turn_aborted|subagent_notification|SECRET|Reading the sync/);
+    assert.deepEqual(parsed.warnings, []);
+    const raw = '<environment_context>\n  <cwd>/home/dev/synthetic-app</cwd>\n</environment_context>\nNow document the flag in the README.';
+    assert.equal(parsed.entries[2].receipt, receipt('codex', c.id, 'msg-3', 'user', raw), 'the receipt still hashes the raw text');
+    assert.equal(parsed.entries[0].receipt, receipt('codex', c.id, 'msg-1', 'user', 'Add a --dry-run flag to the sync command.'));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('Codex phase markers exclude commentary and commit explicit final answers immediately', async () => {
   const dir = temp(), file = join(dir, 'phases.jsonl');
   const message = (id: string, phase: string, channel?: string | null) => ({ type: 'response_item', timestamp: date,

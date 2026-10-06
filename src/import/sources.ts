@@ -54,6 +54,15 @@ function claudeCommand(content: string): string | undefined {
   const name = /<command-name>([^<]*)<\/command-name>/.exec(s)?.[1].trim(), args = /<command-args>([\s\S]*?)<\/command-args>/.exec(s)?.[1].trim();
   return name ? `${name} ${args ?? ''}`.trimEnd() : '';
 }
+/**
+ * Context Codex injects as user messages, as codex-rs recognizes it (core/src/context/contextual_user_message.rs).
+ * Codex matches marked fragments ignoring case, but the `<external_…>` context, the internal-context source and the warnings exactly.
+ */
+const CODEX_MARKED = /^(?:# AGENTS\.md instructions[\s\S]*<\/INSTRUCTIONS>|<(environment_context|user_shell_command|turn_aborted|subagent_notification|skill|agent_message_board_notification|recommended_plugins|goal_context)>[\s\S]*<\/\1>|<hook_prompt hook_run_id="[^"]+">[\s\S]*<\/hook_prompt>)$/i;
+const CODEX_EXACT = /^(?:<external_([^>]+)>[\s\S]*<\/external_\1>|<codex_internal_context source="[a-z][a-z0-9_]*">[\s\S]*<\/codex_internal_context>|Warning: apply_patch was requested via [\s\S]*Use the apply_patch tool instead of exec_command\.|Warning: (?:Your account was flagged for potentially high-risk cyber activity|The maximum number of unified exec processes you can keep open is)[\s\S]*)$/;
+/** What the user typed in a Codex message: every part except the context Codex injected. */
+const codexTyped = (content: unknown) => (Array.isArray(content) ? content : [content]).map(text)
+  .filter(piece => piece && !CODEX_MARKED.test(piece.trim()) && !CODEX_EXACT.test(piece.trim())).join('\n');
 const digest = (s: string) => createHash('sha256').update(s).digest('hex');
 function imported(c: Conversation, id: string, kind: Kind, content: string, date: string, identity = content): ImportedEntry | undefined {
   if (!content.trim()) return undefined;
@@ -115,8 +124,8 @@ export async function scanLocal(source: 'claude' | 'codex', roots?: string[], si
           if (v.type === 'custom-title' || v.type === 'ai-title') title = string(v.customTitle ?? v.aiTitle) ?? title;
         }
         const m = source === 'claude' ? v.message : v.type === 'response_item' ? v.payload : undefined;
-        const typed = record(m) && m.role === 'user' && !title ? text(m.content) : '';
-        const first = source === 'claude' ? claudeCommand(typed) ?? typed : typed;
+        const user = record(m) && m.role === 'user' && !title;
+        const first = !user ? '' : source === 'claude' ? claudeCommand(text(m.content)) ?? text(m.content) : codexTyped(m.content);
         if (first.trim()) {
           title = first.replace(/\s+/g, ' ').slice(0, 110);
           date = timestamp(v.timestamp, date);
@@ -363,7 +372,7 @@ export async function readConversation(c: Conversation, signal?: AbortSignal): P
         }
         if (c.source === 'codex' && v.type === 'response_item' && record(v.payload)) {
           const m = v.payload, id = string(m.id) ?? string(m.call_id) ?? `line:${line}`;
-          if (m.type === 'message' && m.role === 'user') { finish(); add(id, 'user', text(m.content), date); }
+          if (m.type === 'message' && m.role === 'user') { finish(); add(id, 'user', codexTyped(m.content), date, text(m.content)); }
           else if (m.type === 'message' && m.role === 'assistant') {
             pending = [];
             const channel = m.channel ?? m.phase;
