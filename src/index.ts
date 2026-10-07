@@ -77,9 +77,21 @@ export default function optchat(pi: ExtensionAPI) {
   const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
   pi.registerFlag('optchat-profile', { description: 'OptChat profile (required for noninteractive sessions without a saved binding)', type: 'string' });
   const required = () => { if (!active) throw new Error('Choose an OptChat profile first: /optchat profile'); return active; };
+  /** No profile was asked for or chosen: Pi runs as if OptChat were not installed. A profile that was asked for but
+   * could not open is a fault, never plain, so its messages are not answered without their memory. */
+  const plain = () => !active && !remote && fault === undefined;
+  const OWN_TOOLS = ['zoom', 'date', 'search', 'spawn', 'tell'];
+  let hiddenTools: string[] = [];
+  /** A plain session offers no tool that needs a profile; a session that opens one gets them back. */
+  const offerOwnTools = (offer: boolean) => {
+    const tools = pi.getActiveTools();
+    if (offer) { if (hiddenTools.length) pi.setActiveTools([...new Set([...tools, ...hiddenTools])]); hiddenTools = []; return; }
+    const own = tools.filter(name => OWN_TOOLS.includes(name));
+    if (own.length) { hiddenTools = [...new Set([...hiddenTools, ...own])]; pi.setActiveTools(tools.filter(name => !OWN_TOOLS.includes(name))); }
+  };
   const status = (ctx: ExtensionContext) => {
     const a = active;
-    if (!a) { ctx.ui.setStatus('optchat', 'OptChat: choose profile'); return; }
+    if (!a) { ctx.ui.setStatus('optchat', plain() ? 'OptChat: off · /optchat profile' : 'OptChat: choose profile'); return; }
     // A display only: a broken import journal is refused where it matters, never here.
     let note = '';
     try { note = importing ? ' · importing' : pendingImport(a.dir) ? ' · import paused: /optchat import' : ''; }
@@ -136,7 +148,8 @@ export default function optchat(pi: ExtensionAPI) {
   };
   const CONNECT = 'Start a connected subagent conversation here', BACK = 'Back';
   const chooseProfile = async (ctx: ExtensionContext): Promise<string | undefined> => {
-    if (!ctx.hasUI) return undefined;
+    // A client outside the terminal may never answer a picker (T3 Code runs Pi over RPC); it passes --optchat-profile.
+    if (ctx.mode !== 'tui') return undefined;
     const names = listProfiles(), last = lastProfile();
     if (last) names.sort((a, b) => Number(b === last) - Number(a === last));
     const selected = await ctx.ui.select('OptChat profile', [...names, '+ Create profile']);
@@ -197,7 +210,7 @@ export default function optchat(pi: ExtensionAPI) {
   };
 
   pi.on('session_start', async (_event, ctx) => {
-    stopping = false;
+    stopping = false; fault = undefined;
     const entries = ctx.sessionManager.getEntries();
     const saved = entries.findLast(e => e.type === 'custom' && e.customType === binding);
     const boundName = saved?.type === 'custom' && record(saved.data) && typeof saved.data.name === 'string' ? saved.data.name : undefined;
@@ -239,7 +252,13 @@ export default function optchat(pi: ExtensionAPI) {
       } catch (error) { ctx.ui.notify(errorText(error), 'error'); ctx.ui.setEditorText(event.text); }
       return { action: 'handled' };
     }
-    if (!active) { ctx.ui.notify(fault ?? 'Select a profile with /optchat profile before chatting.', 'error'); return { action: 'handled' }; }
+    if (plain()) return { action: 'continue' };
+    if (!active) {
+      // A client outside the terminal waits for the run it asked for (T3 Code ignores a handled prompt), so start
+      // one: the context hook ends it at once with the reason.
+      if (ctx.mode !== 'tui') return { action: 'continue' };
+      ctx.ui.notify(fault ?? 'Select a profile with /optchat profile before chatting.', 'error'); return { action: 'handled' };
+    }
     if (importing || pendingImport(active.dir)) { ctx.ui.notify('This profile has an import in progress. Use /optchat import to resume or discard it, or switch profiles.', 'info'); return { action: 'handled' }; }
     if (event.source !== 'extension') {
       try { active.inbox.record(event.text); }
@@ -259,6 +278,9 @@ export default function optchat(pi: ExtensionAPI) {
     if (active && !runStarted) startRun(ctx);
   });
   pi.on('before_agent_start', (event, ctx) => {
+    // Pi activates the session's tools after session_start, so the set is adjusted here, before the first request.
+    offerOwnTools(!plain());
+    if (!active) return; // Plain, or a fault the context hook reports.
     startRun(ctx);
     const a = required();
     // Pi's own prompt sections (AGENTS.md files, skills, cwd) stay; the profile's instructions go last.
@@ -292,7 +314,9 @@ export default function optchat(pi: ExtensionAPI) {
     if (bounded !== event.message) return { message: bounded };
   });
   pi.on('context_with_system', async (event, ctx) => {
+    if (plain()) return;
     try {
+      if (!active && fault) throw new Error(fault);
       const a = required();
       if (importing || pendingImport(a.dir)) throw new Error('Profile is unavailable while importing.');
       if (fault) throw new Error(fault);
@@ -311,9 +335,10 @@ export default function optchat(pi: ExtensionAPI) {
       return { messages: [{ role: 'system', content: 'OptChat context unavailable. Stop.', timestamp: 0 }] };
     }
   });
-  pi.on('before_provider_request', (event, ctx) => ctx.model?.api === 'anthropic-messages' ? cachePayload(event.payload) : event.payload);
-  pi.on('cache_warming_decision', () => ({ action: 'stop' }));
+  pi.on('before_provider_request', (event, ctx) => active && ctx.model?.api === 'anthropic-messages' ? cachePayload(event.payload) : event.payload);
+  pi.on('cache_warming_decision', () => active ? { action: 'stop' } : undefined);
   pi.on('session_before_compact', (_event, ctx) => {
+    if (!active) return; // A plain session compacts as Pi does.
     ctx.ui.notify('OptChat manages history between turns. Pi compaction is disabled; an exceptionally long single run may require stopping and continuing in a new turn.', 'info');
     return { cancel: true };
   });
