@@ -1,9 +1,8 @@
-import { chmodSync } from 'node:fs';
 import { createConnection, createServer, type Socket } from 'node:net';
 import type { Children } from './agents.ts';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { record } from './cache.ts';
-import { checkSocketPath, profileSocket, removeStaleSocket } from './profiles.ts';
+import { checkSocketPath, profileSocket, removeStaleSocket, restrictSocket } from './profiles.ts';
 import { textContent } from './transcript.ts';
 import { isActiveRun } from './runs.ts';
 
@@ -167,12 +166,14 @@ export async function serveWindows(directory: string, children: Children, availa
     });
   });
   await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(path, () => { server.off('error', reject); resolve(); }); });
-  chmodSync(path, 0o600);
+  restrictSocket(path);
   return async () => {
     closing = true;
     const closed = new Promise<void>(resolve => server.close(() => resolve()));
+    // Each socket's close handler queues its child's cleanup; wait for them all before collecting the work.
+    const hungUp = [...connections].map(socket => new Promise<void>(resolve => socket.once('close', () => resolve())));
     for (const socket of connections) socket.destroy();
-    await closed;
+    await Promise.all([closed, ...hungUp]);
     await Promise.allSettled([...work]);
   };
 }

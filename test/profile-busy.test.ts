@@ -122,7 +122,9 @@ test('two Pis with different TMPDIRs still share one profile lock', async () => 
   }
 });
 
-test('a regular file named like the lock socket is refused, not deleted', async () => {
+const posixSocket = process.platform === 'win32' && 'Windows locks with a named pipe, which has no file or path limit';
+
+test('a regular file named like the lock socket is refused, not deleted', { skip: posixSocket }, async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-lock-'));
   try {
     writeFileSync(profileSocket(dir), 'notes');
@@ -131,7 +133,20 @@ test('a regular file named like the lock socket is refused, not deleted', async 
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('a socket path over the system limit names OPTCHAT_HOME and its length without binding a truncated socket, and one at the limit locks', async () => {
+test('on Windows, every spelling of one profile directory names the same pipe', { skip: process.platform !== 'win32' && 'only Windows names the lock after the directory' }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-pipe-'));
+  try {
+    const pipe = profileSocket(dir);
+    assert.match(pipe, /^\\\\\.\\pipe\\optchat-lock-/);
+    assert.equal(profileSocket(dir.toUpperCase()), pipe);
+    assert.equal(profileSocket(dir.replaceAll('\\', '/') + '/'), pipe);
+    assert.notEqual(profileSocket(dir, 'windows'), pipe);
+    const unlock = await lockProfile(dir.toUpperCase(), 'holder');
+    try { await assert.rejects(lockProfile(dir, 'second'), /holder/); } finally { await unlock(); }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a socket path over the system limit names OPTCHAT_HOME and its length without binding a truncated socket, and one at the limit locks', { skip: posixSocket }, async () => {
   const root = mkdtempSync('/tmp/oc.');
   try {
     const fileLength = Buffer.byteLength(basename(profileSocket(root)));

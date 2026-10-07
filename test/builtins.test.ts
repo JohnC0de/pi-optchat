@@ -23,6 +23,14 @@ async function until(condition: () => boolean) {
   while (!condition()) { if (Date.now() > deadline) throw new Error('Timed out'); await new Promise(r => setTimeout(r, 10)); }
 }
 
+/** Windows refuses to remove a folder while an exiting MCP server process still holds it, so wait for it to let go. */
+async function removeTree(dir: string) {
+  await until(() => {
+    try { rmSync(dir, { recursive: true, force: true }); return true; }
+    catch (error) { if (process.platform === 'win32' && error instanceof Error && 'code' in error && error.code === 'EPERM') return false; throw error; }
+  });
+}
+
 /** A main session that loads the built-in extensions the way Pi's CLI does, and the names it reports. */
 async function mainBuiltins(cwd: string, settings: object, extra: ((pi: ExtensionAPI) => void)[] = []) {
   let api: ExtensionAPI | undefined;
@@ -98,7 +106,7 @@ test('subagents at every depth get the main session\'s built-in extensions and c
     assert.deepEqual(servers(), [], 'no MCP server process starts');
     await off.close();
     assert.deepEqual(warnings, []);
-  } finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); rmSync(join(agentDir, 'mcp.json'), { force: true }); }
+  } finally { await memory.close(); await removeTree(dir); rmSync(join(agentDir, 'mcp.json'), { force: true }); }
 });
 
 test('a batch that fails mid-launch closes the MCP connections of the children it rolls back', async () => {
@@ -126,7 +134,7 @@ test('a batch that fails mid-launch closes the MCP connections of the children i
     await assert.rejects(children.spawn([{ task: 'one' }, { task: 'two' }], dir), /session store unavailable/);
     await until(() => readFileSync(log, 'utf8').includes('exit'));
     assert.deepEqual(readFileSync(log, 'utf8').trim().split('\n').map(line => line.split(' ')[0]), ['start', 'exit']);
-  } finally { await children.close(); await memory.close(); rmSync(dir, { recursive: true, force: true }); rmSync(join(agentDir, 'mcp.json'), { force: true }); }
+  } finally { await children.close(); await memory.close(); await removeTree(dir); rmSync(join(agentDir, 'mcp.json'), { force: true }); }
 });
 
 test('a child whose extensions fail to start still closes its MCP connections', async () => {
@@ -152,5 +160,5 @@ test('a child whose extensions fail to start still closes its MCP connections', 
     await until(() => readFileSync(log, 'utf8').includes('exit'));
     assert.deepEqual(readFileSync(log, 'utf8').trim().split('\n').map(line => line.split(' ')[0]), ['start', 'exit']);
     assert.equal(children.active, false, 'the failed child holds no agent slot');
-  } finally { await children.close(); await memory.close(); rmSync(dir, { recursive: true, force: true }); rmSync(join(agentDir, 'mcp.json'), { force: true }); }
+  } finally { await children.close(); await memory.close(); await removeTree(dir); rmSync(join(agentDir, 'mcp.json'), { force: true }); }
 });

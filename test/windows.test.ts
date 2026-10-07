@@ -475,9 +475,10 @@ for (const scenario of ['before-first-tick', 'after-reply', 'missing-transcript'
     });
     const close = await serveWindows(f.dir, f.children, () => true, async text => { f.reports.push(text); });
     const client = await connectWindow(f.dir, event => events.push(event), () => {});
-    interval.mock.restore();
     try {
       await client.request('start', scenario === 'after-reply' ? 'Hello' : 'provider-failure', f.dir);
+      // A client can be connected before the server's connection handler ran (Windows pipes); a reply proves it ran.
+      interval.mock.restore();
       const id = events.find(e => e.name === 'started')?.text; assert.ok(id); assert.ok(tick);
       if (scenario === 'after-reply') {
         await until(() => f.children.history.records.get(id)?.state === 'waiting');
