@@ -221,6 +221,19 @@ test('stable cache cuts preserve every character and cap marks at four', () => {
   }
 });
 
+test('the end-of-request mark sits on the last block, so a proxy that sets its own TTL there agrees with it', () => {
+  const payload: { cache_control?: unknown; messages: { role: string; content: Record<string, unknown>[] }[] } = { messages: [
+    { role: 'user', content: [{ type: 'text', text: '<chat>\n0+1|a decision\n</chat>' }, { type: 'text', text: 'question' }] },
+    { role: 'assistant', content: [{ type: 'text', text: 'calling a tool' }] },
+    { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't', content: 'output' }, { type: 'text', text: '' }] },
+  ] };
+  cachePayload(payload);
+  assert.equal(payload.cache_control, undefined, 'no top-level automatic mark');
+  assert.deepEqual(payload.messages[2].content[0].cache_control, { type: 'ephemeral' });
+  assert.equal(payload.messages[2].content[1].cache_control, undefined, 'never on an empty text block');
+  assert.equal((JSON.stringify(payload).match(/cache_control/g) ?? []).length, 1);
+});
+
 test('next turn excludes old conversation; current tool loop and reasoning remain verbatim', async () => {
   const system: SystemMessage = { role: 'system', content: 'old system', timestamp: 0 };
   const old: UserMessage = { role: 'user', content: 'OLD FULL CONVERSATION', timestamp: 1 };

@@ -42,6 +42,27 @@ export function cachePayload(payload: unknown): unknown {
     delete message.cache_control;
     if (Array.isArray(message.content)) for (const item of message.content) if (record(item) && !view.has(item)) delete item.cache_control;
   }
-  payload.cache_control = { type: 'ephemeral' };
+  markRequestEnd(messages);
   return payload;
+}
+
+const CACHEABLE = new Set(['text', 'image', 'document', 'tool_result']);
+/** The recipe's end-of-request mark, on the last block rather than as Anthropic's top-level automatic mark, which
+ * means the same. A proxy may give that block its own TTL (CLIProxyAPI gives OAuth requests 1h), and Anthropic
+ * refuses a top-level mark whose TTL differs from the block's. */
+function markRequestEnd(messages: unknown[]) {
+  const last = messages.at(-1);
+  if (!record(last)) return;
+  if (typeof last.content === 'string') {
+    if (last.content) last.content = [{ type: 'text', text: last.content, cache_control: { type: 'ephemeral' } }];
+    return;
+  }
+  if (!Array.isArray(last.content)) return;
+  for (let i = last.content.length - 1; i >= 0; i--) {
+    const block: unknown = last.content[i];
+    if (!record(block) || typeof block.type !== 'string' || !CACHEABLE.has(block.type)) continue;
+    if (block.type === 'text' && !block.text) continue;
+    block.cache_control ??= { type: 'ephemeral' };
+    return;
+  }
 }
