@@ -21,7 +21,7 @@ pi install npm:pi-web-access   # optional, for web search and page fetching
 
 Or from GitHub: `pi install git:github.com/jonaslsaa/pi-optchat`.
 
-Requirements: Pi 1.0.2 or compatible, Node.js 22.19+, and Git. Tested on macOS; the offline tests also run on Linux.
+Requirements: Pi 1.0.2 or compatible, Node.js 22.19+, and Git. Tested on macOS; the offline tests also run on Linux and Windows.
 
 Web access is not bundled. Subagents load the Pi extensions you have installed (except pi-optchat itself), so installing `pi-web-access` gives web tools to the main agent and every subagent.
 
@@ -183,7 +183,7 @@ Each profile is locked to one Pi process. If you open the same profile in a seco
 - Closing or force-quitting the window also produces a handoff, marked **interrupted**.
 - If the original window is closed cleanly, handoffs are delivered on next start. If it is killed, reopening the profile recovers unfinished handoffs (work is not restarted).
 - Text only. For images, give the agent a file path.
-- The connection is a local socket restricted to your OS user. No daemon or server.
+- The connection is a local socket restricted to your OS user (a named pipe on Windows). No daemon or server.
 
 Handoff limits: the whole transcript is summarized in one call if it fits in about 128,000 input tokens (estimated at 4 bytes per token; less on smaller models), otherwise in chunks. Output is up to 16,000 tokens, with a 5-minute timeout per call. If summarizing fails, a labelled fallback still reports the task, last result, and transcript locations.
 
